@@ -61,9 +61,6 @@ def calculate_esm(model_location, fasta_file, output_dir, GPU_name='cuda:0', tok
             if torch.cuda.is_available() and not nogpu:
                 toks = toks.to(device=GPU_name, non_blocking=True)
 
-            # The model is trained on truncated sequences and passing longer ones in at
-            # infernce will cause an error. See https://github.com/facebookresearch/esm/issues/21
-
             out = model(toks, repr_layers=repr_layers, return_contacts=return_contacts)
 
             logits = out["logits"].to(device="cpu")
@@ -77,8 +74,6 @@ def calculate_esm(model_location, fasta_file, output_dir, GPU_name='cuda:0', tok
                 output_file = output_dir / f"{label}.pt"
                 output_file.parent.mkdir(parents=True, exist_ok=True)
                 result = {"label": label}
-                # Call clone on tensors to ensure tensors are not views into a larger representation
-                # See https://github.com/pytorch/pytorch/issues/1995
                 result["mean_representations"] = {
                     layer: t[i, 1 : len(strs[i]) + 1].mean(0).clone()
                     for layer, t in representations.items()
@@ -100,13 +95,6 @@ def esm_to_np(dir_name, out_put_file):
         li.append(ts)
     np.save(out_put_file, np.stack(li, axis=0))
     
-# def map_col(col_name):
-#     if "Bind" in col_name:
-#         return "Bind"
-#     elif "Display" in col_name:
-#         return "Display"
-#     else:
-#         return col_name
     
 def generate_training_dataset_from_csv(filepath, sequence_col_name, output_dirc, GPU_name='cuda'):
     """
@@ -141,8 +129,6 @@ def generating(df, sequence_col_name, output_dirc, GPU_name):
     df = df[df[sequence_col_name].apply(lambda x: type(x) == str)]
     df = df[df[sequence_col_name].map(lambda x: False == bool(re.search('[^ARNDCEQGHILKMFPSTWYV]', x)))]
     df.to_csv(output_dirc+"/refined.csv")
-    
-    #write fasta file
     i = 0
     f = open(output_dirc+"/refined.fas",'w')
     for index, item in df[sequence_col_name].items():
@@ -392,18 +378,9 @@ def train_rf(antibody_list=[], verbose=0, n_jobs=25, max_depth=20, tune_hyper=Fa
         RandomForestClassifier object
     """
     array = np.concatenate([i.arr_relative for i in antibody_list])
-
-    # if use_class_weight:
-    #     class_weight = cal_class_weight(array, ratio=class_ratio)
-    # else:
-    #     class_weight = None
-        
     X = array[:,:-2]
     w = array[:,-2]
     y = array[:,-1]
-    
-    # X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
-    #                                                     X, y, w, test_size=test_size, random_state=0) # random number from np
     
     if tune_hyper:
         class_weight = cal_class_weight_np(array)
@@ -418,14 +395,7 @@ def train_rf(antibody_list=[], verbose=0, n_jobs=25, max_depth=20, tune_hyper=Fa
     w = array[:,-2]
     y = array[:,-1]
     del(array)
-    
     clf.fit(X, y, sample_weight=w)
-    
-    # if test:
-    #     y_pred=clf.predict(X_test)
-    #     print("metrics on the test set:")
-    #     print_metrics(y_test,y_pred,w_test)
-        
     return clf
 
 def test_rf(clf, antibody_list):
@@ -546,12 +516,6 @@ def train_NN(antibody_list, record_name, batch_size, lr, NN_architecture=None,
         last_average_score['F1'] = 0.0
         for name in metrics_names:
             rolling_score[name] = 0.0
-        
-        # with torch.profiler.profile(
-        #      schedule=torch.profiler.schedule(wait=1, warmup=1, active=2),
-        #      on_trace_ready=torch.profiler.tensorboard_trace_handler('./tensorboard/{}_profiler'.format(record_name_loop)),
-        #      record_shapes=True
-        #  ) as prof:
 
         for epoch in range(num_epochs):
             for i, (x, w, y) in enumerate(Training_dataloader):      
@@ -575,10 +539,6 @@ def train_NN(antibody_list, record_name, batch_size, lr, NN_architecture=None,
             # Track on training
             current_f1 = running_f1_score / n_step
             writer.add_scalar('training F1', current_f1, epoch+reloaded_epoch)
-            # if current_f1 + 0.1 < last_f1:
-            #     print("Bad leanring process")
-                # break
-            # last_f1 = current_f1
             running_f1_score = 0.0
                                
             # Early stopping
@@ -705,8 +665,6 @@ def embeding_seqs(seqs):
     model, alphabet = esm.pretrained.esm1b_t33_650M_UR50S()
     batch_converter = alphabet.get_batch_converter()
     model.eval()  # disables dropout for deterministic results
-    
-    # Prepare data (first 2 sequences from ESMStructuralSplitDataset superfamily / 4)
     data = seqs
     batch_labels, batch_strs, batch_tokens = batch_converter(data)
     
@@ -714,9 +672,6 @@ def embeding_seqs(seqs):
     with torch.no_grad():
         results = model(batch_tokens, repr_layers=[33], return_contacts=True)
     token_representations = results["representations"][33]
-    
-    # Generate per-sequence representations via averaging
-    # NOTE: token 0 is always a beginning-of-sequence token, so the first residue is token 1.
     sequence_representations = []
     for i, (_, seq) in enumerate(data):
         sequence_representations.append(token_representations[i, 1 : len(seq) + 1].mean(0))
