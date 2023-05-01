@@ -1,50 +1,48 @@
-import pandas as pd
+import csv
+import os
+import pathlib
+import re
+
 import numpy as np
-
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier as RFC
-from sklearn import metrics
-from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import fbeta_score, make_scorer
-
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.profiler
-from torch.utils.data import Dataset, DataLoader
-import math
-from torch.utils.tensorboard import SummaryWriter
-from torchmetrics import F1Score, Precision, Recall
-import csv
-
-import pathlib
-import esm
-import re
-from esm import Alphabet, FastaBatchedDataset, ProteinBertModel, pretrained, MSATransformer
 from os import listdir, mkdir, remove
 from shutil import rmtree
-import os
+from torch.utils.data import Dataset, DataLoader
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics import F1Score, Precision, Recall
+from sklearn import metrics
+from sklearn.metrics import f1_score, make_scorer, recall_score, precision_score
+from sklearn.ensemble import RandomForestClassifier as RFC
+from sklearn.metrics import fbeta_score, make_scorer
+from sklearn.model_selection import GridSearchCV, train_test_split
+import esm
+from esm import Alphabet, FastaBatchedDataset, ProteinBertModel, pretrained, MSATransformer
 
-""""............................generate data sets........................................"""
 
 def calculate_esm(model_location, fasta_file, output_dir, GPU_name='cuda:0', toks_per_batch=4096, nogpu=False, return_contacts=False, repr_layers=[-1]):
     fasta_file = pathlib.Path(fasta_file)
     output_dir = pathlib.Path(output_dir)
     model, alphabet = pretrained.load_model_and_alphabet(model_location)
     model.eval()
+    
     if isinstance(model, MSATransformer):
         raise ValueError(
             "This script currently does not handle models with MSA input (MSA Transformer)."
         )
+        
     if torch.cuda.is_available() and not nogpu:
         model = model.cuda(GPU_name)
         print("Transferred model to GPU")
 
     dataset = FastaBatchedDataset.from_file(fasta_file)
     batches = dataset.get_batch_indices(toks_per_batch, extra_toks_per_seq=1)
-    data_loader = torch.utils.data.DataLoader(
-        dataset, collate_fn=alphabet.get_batch_converter(), batch_sampler=batches
-    )
+    batch_converter = alphabet.get_batch_converter()
+    data_loader = torch.utils.data.DataLoader(dataset, collate_fn=batch_converter, batch_sampler=batches)
+    
     print(f"Read {fasta_file} with {len(dataset)} sequences")
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -82,43 +80,46 @@ def calculate_esm(model_location, fasta_file, output_dir, GPU_name='cuda:0', tok
                     result,
                     output_file,
                 )
-                
-def esm_to_np(dir_name, out_put_file):
+
+def esm_to_np(dir_name, output_file):
     """
-    convert esm mean_representations to np
-    Parameters: dir_name: directory of esm 
-                out_put_file: npy name
+    Convert ESM mean_representations to NumPy array format.
+
+    Args: 
+        dir_name (str): The directory containing ESM mean representations.
+        output_file (str): The name of the output .npy file.
     """
     li = []
     for i in listdir(dir_name):
-        ts = torch.load(dir_name+"/"+i)["mean_representations"][33]
+        ts = torch.load(dir_name + "/" + i)["mean_representations"][33]
         li.append(ts)
-    np.save(out_put_file, np.stack(li, axis=0))
-    
-    
+    np.save(output_file, np.stack(li, axis=0))
+
 def generate_training_dataset_from_csv(filepath, sequence_col_name, output_dirc, GPU_name='cuda'):
     """
-    Args: 
-        filepath: The filepath of csv file
-        sequence_col_name: Sequence column name
-        output_dirc: output dirctory that stores training datasets
-        GPU_name: GPU for esm embedding
+    This function reads a CSV file, generates a training dataset based on the specified sequence column,
+    and saves the resulting training datasets in the given output directory.
+
+    Args:
+        filepath (str): The file path of the input CSV file.
+        sequence_col_name (str): The name of the column in the CSV file containing the sequence data.
+        output_dirc (str): The directory path where the generated training datasets will be saved.
+        GPU_name (str, optional): The name of the GPU to be used for ESM embedding. Defaults to 'cuda'.
     """
     if not os.path.exists(output_dirc):
         mkdir(output_dirc)
     df = pd.read_csv(filepath)
     generating(df, sequence_col_name, output_dirc, GPU_name=GPU_name)
     
-    
 def generate_training_dataset_from_excel(filepath, sequence_col_name, output_dirc, GPU_name='cuda', sheet_name=0):
     """
     Args: 
-        filepath: The filepath of excel file
-        sequence_col_name: Sequence column name
-        output_dirc: output dirctory that stores training datasets
-        GPU_name: GPU for esm embedding
-        sheet_name: should be used when having multi sheets in one excel file.
-            Strings are used for sheet names. Integers are used in zero-indexed sheet positions (chart sheets do not count as a sheet position)
+        filepath (str): The filepath of the input Excel file.
+        sequence_col_name (str): The name of the column in the Excel file containing the sequence data.
+        output_dirc (str): The directory path where the generated training datasets will be saved.
+        GPU_name (str, optional): The name of the GPU to be used for ESM embedding. Defaults to 'cuda'.
+        sheet_name (Union[int, str], optional): The sheet name or index in the Excel file to read data from.
+            Strings are used for sheet names. Integers are used in zero-indexed sheet positions (chart sheets do not count as a sheet position). Defaults to 0.
     """
     if not os.path.exists(output_dirc):
         mkdir(output_dirc)
@@ -128,44 +129,38 @@ def generate_training_dataset_from_excel(filepath, sequence_col_name, output_dir
 def generating(df, sequence_col_name, output_dirc, GPU_name):
     df = df[df[sequence_col_name].apply(lambda x: type(x) == str)]
     df = df[df[sequence_col_name].map(lambda x: False == bool(re.search('[^ARNDCEQGHILKMFPSTWYV]', x)))]
-    df.to_csv(output_dirc+"/refined.csv")
-    i = 0
-    f = open(output_dirc+"/refined.fas",'w')
-    for index, item in df[sequence_col_name].items():
-        if i == 0:
-            f.write(">"+str(i)+"\n")
-            f.write(item)
-        else:
-            f.write("\n>"+str(i)+"\n")
-            f.write(item)            
-        i += 1
-    f.close()
+    df.to_csv(output_dirc + "/refined.csv")
     
-    calculate_esm("esm1b_t33_650M_UR50S", output_dirc+"/refined.fas", output_dirc+"/emb_esm1b", GPU_name=GPU_name)
-    esm_to_np(output_dirc+"/emb_esm1b", output_dirc+"/esm.npy")
-    rmtree(output_dirc+"/emb_esm1b")
-    remove(output_dirc+"/refined.fas")
+    # Write fasta file
+    i = 0
+    with open(output_dirc + "/refined.fas", 'w') as f:
+        for index, item in df[sequence_col_name].items():
+            if i != 0:
+                f.write("\n")
+            f.write(f">{i}\n{item}")
+            i += 1
+    
+    calculate_esm("esm1b_t33_650M_UR50S", output_dirc + "/refined.fas", output_dirc + "/emb_esm1b", GPU_name=GPU_name)
+    esm_to_np(output_dirc + "/emb_esm1b", output_dirc + "/esm.npy")
+    rmtree(output_dirc + "/emb_esm1b")
+    remove(output_dirc + "/refined.fas")
 
-""""............................antibody cls........................................"""
 
-class antibody_cls:
+""""............................AntibodyCls........................................"""
+
+class AntibodyCls:
     def __init__(self, dataset_dirc, mutation_count_column=None, D_col="Display", B_col="Bind", bin_num=2, using_chain_as_feature=False, name=None):
-        """Load antibody dataset generated by generate_training_dataset function into one object
-        
-        Can handle two or four gates binding data.
-        If experiments have four gates, csv file need 'Bin1','Bin2','Bin3','Bin4' as reads column names
-        If experiments have two gates, column names of display and binding reads need to be specified
-        
+        """
+        Load an antibody dataset generated by the generate_training_dataset function into one object.
+
         Args: 
-            dataset_dirc: the name of dirctory generated by generate_training_dataset function
-            mutation_count_column: Mutation count column name, used for finding parental sequence
-                If not provided, the parental index default 0.
-            D_col: Display reads column name, only for 2 gates experiment data
-            B_col: Binding reads column name, only for 2 gates experiment data
-            bin_num: The number of gates in experiments, should be 2 or 4
-            using_chain_as_feature: Add HC or LC as one input feature or not.
-            name: only used when using chain feature, distinguish HC or LC by checking whether having "HC" or "LC" in name
-                (if deal with CCR8, name will be used for cells count reference, it should be "35A6_HC", "35A6_LC", "35B6_HC", or "35B6_LC")
+            dataset_dirc (str): The name of the directory generated by the generate_training_dataset function.
+            mutation_count_column (str, optional): The name of the mutation count column in the dataset. If not provided, the parental index defaults to 0.
+            D_col (str, optional): The name of the column representing display values in the dataset. Defaults to "Display".
+            B_col (str, optional): The name of the column representing bind values in the dataset. Defaults to "Bind".
+            bin_num (int, optional): The number of gates in the experiments. Defaults to 2.
+            using_chain_as_feature (bool, optional): Whether to add HC or LC as an input feature. Defaults to False.
+            name (str, optional): Used only when using_chain_as_feature is True. Distinguishes between HC and LC by checking if the name contains "HC" or "LC". Defaults to None.
         """
         self.esm = np.load(dataset_dirc+"/esm.npy")
         self.n_sequences = self.esm.shape[0]
@@ -197,29 +192,16 @@ class antibody_cls:
     def update_parent_index(self, mutation_count_column):
         """Update the parental index using mutation count"""
         self.parent_index = self.df[self.df[mutation_count_column]==0].index[0]
-    
-    #cell counts for CCR8
-    counts = {'35A6_HC': {'cells_bins': [42835, 257193, 611967, 861289], 'reads_bins': [288091, 519296, 708095, 1174710]},
-              '35A6_LC': {'cells_bins': [4231,   90008,   311152,   559060], 'reads_bins': [445436,   671442,   1013472,   1387306]},
-              '35B6_HC': {'cells_bins': [127359,   304017,   447249,   617209], 'reads_bins': [327636,   538160,   809533,   922335]},
-              '35B6_LC': {'cells_bins': [26841,   231633,   339631,   412200], 'reads_bins': [431283,   570909,   932746,   1204253]}}
+   
     
     def cal_binding(self):
-        """Calculate binding affinity and add the binding affinity as a column 'binding' to date frame
-        
-        When 4 gates:
-            Calculate the weighted average using 'Bin1','Bin2','Bin3','Bin4' columns and antibody_cls.counts
-            
-        When 2 gates:
-            Calculate the ratio of B_frac/D_frac
-        
+        """
+        Calculate binding affinity and add the binding affinity as a column 'binding' to date frame.
         """
         if self.bin_num==4:
             df = self.df[['Bin1','Bin2','Bin3','Bin4']]
-            df = df/antibody_cls.counts[self.name]['reads_bins']*antibody_cls.counts[self.name]['cells_bins']
-            # df = df/sum(antibody_cls.counts[self.name]['cells_bins'])
-            # self.df['binding'] = df.apply(lambda x: antibody_cls.func1(x['Bin1'], x['Bin2'], x['Bin3'], x['Bin4']), axis=1)
-            self.df['binding'] = df.apply(lambda x: antibody_cls.func2(x['Bin1'], x['Bin2'], x['Bin3'], x['Bin4']), axis=1)
+            df = df/AntibodyCls.counts[self.name]['reads_bins']*AntibodyCls.counts[self.name]['cells_bins']
+            self.df['binding'] = df.apply(lambda x: AntibodyCls.func2(x['Bin1'], x['Bin2'], x['Bin3'], x['Bin4']), axis=1)
             
         elif self.bin_num==2:
             sum_bind = self.df[self.B_col].sum()
@@ -237,39 +219,15 @@ class antibody_cls:
         return (a+b)/(c+d) if (c+d) != 0 else float('inf')
     
     def cal_ln_weight(self):
-        """Calculate sample weight and add the sample weight as a column 'sample_weight' to date frame
-        
-        When 4 gates:
-            Calculate sample weight basing on reads and cell counts, sample_weight = ln(sample_cell_count + 1)
-            
-        When 2 gates:
-            sample_weight = ln(B_col+D_col)
-            
-        """
         if self.bin_num==4:
-            # df = self.df[['Bin1','Bin2','Bin3','Bin4']]
-            # df = df/antibody_cls.counts[self.name]['reads_bins']*antibody_cls.counts[self.name]['cells_bins']
-            # self.df['cells_count'] = df.sum(axis=1)
-            # self.df['sample_weight'] = np.log(self.df['cells_count'] + 1)
             self.df['sample_weight'] = np.log(self.df['Bin1']+self.df['Bin2']+self.df['Bin3']+self.df['Bin4'])
         elif self.bin_num==2:
             self.df['sample_weight'] = np.log(self.df[self.B_col]+self.df[self.D_col])
         
     def classify(self):
-        """Classify numerical binding data and add the results as a column 'class' to date frame
-        
-        Note: this methods does not use parental binding data
-        Used for numerical binding data calculated by weighted average of gate reads
-        """
         self.df["class"] = self.df['binding'].apply(self.map_1)
             
     def generate_relative_data(self):
-        """Calculate relative esm representation and classify binding affinity comparing to the parental sequence
-        
-        After running cal_ln_weight and cal_binding
-        Generate self.df_relative dataframe, including a column "class"
-        Generate self.esm_relative array with a shape of (n_sequences-1, dimension_of_ESM_repres)
-        """
         parent_series = self.df.loc[self.parent_index]
         self.df_relative = self.df.drop(index=self.parent_index)
         self.up_20 = parent_series['binding'] * 1.2
@@ -285,7 +243,6 @@ class antibody_cls:
         
     @staticmethod
     def map_1(x):
-        """convert numerical binding affinity (1~4) to class [2,1,0]"""
         if x < 2:
             return 2
         elif x < 3:
@@ -300,7 +257,6 @@ class antibody_cls:
             return 1    
         
     def calculate_training_array(self, relative_data = True):
-        """Store all training necessory data in one array, self.arr_relative or self.arr"""
         if relative_data:
             df_array = self.df_relative[['sample_weight','class']].to_numpy()
             if self.using_chain_as_feature:
@@ -315,122 +271,109 @@ class antibody_cls:
             df_array = self.df[['sample_weight','class']].to_numpy()
             self.arr = np.concatenate((self.esm, df_array), axis=1)
             del self.esm
-            
-class antibody_cls_from_BLADE(antibody_cls):
-    """Load antibody dataset generated by generate_training_dataset function into one object
-    
-    Can handle dataset designed for BLADE, the dataset should have "Observations" and "Response" columns, and has parent sequence in the first row.
-    
-    Args: 
-        dataset_dirc: the name of dirctory generated by generate_training_dataset function
-        using_chain_as_feature: Add HC or LC as one input feature or not.
-        name: only used when using chain feature, distinguish HC or LC by checking whether having "HC" or "LC" in name
-            (if deal with CCR8, name will be used for cells count reference, it should be "35A6_HC", "35A6_LC", "35B6_HC", or "35B6_LC")
-    """
-    
-    def __init__(self, dataset_dirc, using_chain_as_feature=False, name=None):
-        """
-        """
-        super().__init__(dataset_dirc=dataset_dirc, using_chain_as_feature=using_chain_as_feature, name=name)
-        self.df.rename(columns = {'Response':'binding'}, inplace = True)
-    
-    def generate_training_array(self):
-        self.cal_ln_weight()
-        self.generate_relative_data()
-        self.calculate_training_array()
-        
-    def cal_ln_weight(self):
-        self.df['sample_weight'] = np.log(self.df["Observations"])
-        
-        
+
 """"............................Random Forest classifier........................................"""
 
-
-def cal_class_weight_np(array, ratio=1):
+def calculate_class_weights(array, ratio=1):
     """Calculate class weights"""
-    if ratio == None:
+    if ratio is None:
         return None
     r = [1]
     r.append(ratio)
-    li = np.bincount(array[:,-1].astype(int), weights=array[:,-2])
-    li = li/li.max()
-    li = 1/li
+    li = np.bincount(array[:, -1].astype(int), weights=array[:, -2])
+    li = li / li.max()
+    li = 1 / li
     li = li * r
     return dict(enumerate(li))
 
+
 def print_metrics(y_test, y_pred, sample_weight):
-    print("F1_score for [lower affinity, maintain or increase] class:",metrics.f1_score(y_test, y_pred, sample_weight=sample_weight, average=None))
-        
+    print("F1_score for [lower affinity, maintain or increase] class:",
+          f1_score(y_test, y_pred, sample_weight=sample_weight, average=None))
+
+
 def train_rf(antibody_list=[], verbose=0, n_jobs=25, max_depth=20, tune_hyper=False, parameters={}, fbeta=1):
-    """Train and test a RandomForestClassifier using sklearn
-    
+    """
+    Train and test a RandomForestClassifier using the scikit-learn library.
+
     Args:
-        antibody_list: A list of antibody objects
-        verbose: Controls the verbosity when fitting, set 2 for detials
-        n_jobs: The number of jobs to run in parallel
-        max_depth: The max depth of trees
-        tune_hyper: GridSearchCV or not
-        parameters: param_griddict or list of dictionaries. Dictionary with parameters names (str) as keys and lists of parameter settings to try as values, or a list of such dictionaries, in which case the grids spanned by each dictionary in the list are explored. This enables searching over any sequence of parameter settings.
-        fbeta: Determines the weight of recall in the F score, beta < 1 lends more weight to precision, while beta > 1 favors recall 
-            (beta -> 0 considers only precision, beta -> +inf only recall).
-        
-    Return:
-        RandomForestClassifier object
+        antibody_list (List[Antibody]): A list of antibody objects. Defaults to an empty list.
+        verbose (int, optional): Controls the verbosity when fitting. Set to 2 for more detailed output. Defaults to 0.
+        n_jobs (int, optional): The number of jobs to run in parallel. Defaults to 25.
+        max_depth (int, optional): The maximum depth of the trees in the random forest. Defaults to 20.
+        tune_hyper (bool, optional): Whether to perform hyperparameter tuning using GridSearchCV. Defaults to False.
+        parameters (Dict[str, List] or List[Dict[str, List]], optional): A dictionary with parameter names as keys and lists
+            of parameter settings to try as values, or a list of such dictionaries. This enables searching over any sequence
+            of parameter settings. Defaults to an empty dictionary.
+        fbeta (float, optional): Determines the weight of recall in the F-score. A value of beta less than 1 lends more
+            weight to precision, while a value of beta greater than 1 favors recall. As beta approaches 0, only precision
+            is considered, while as beta approaches +inf, only recall is considered. Defaults to 1.
+
+    Returns:
+        RandomForestClassifier: A trained RandomForestClassifier object.
     """
     array = np.concatenate([i.arr_relative for i in antibody_list])
-    X = array[:,:-2]
-    w = array[:,-2]
-    y = array[:,-1]
-    
+
+    X = array[:, :-2]
+    w = array[:, -2]
+    y = array[:, -1]
+
     if tune_hyper:
-        class_weight = cal_class_weight_np(array)
-        rfc = RFC(n_jobs=n_jobs, class_weight = class_weight)
-        scorer = make_scorer(fbeta_score, beta=fbeta, pos_label=1)
+        class_weight = calculate_class_weights(array)
+        rfc = RFC(n_jobs=n_jobs, class_weight=class_weight)
+        scorer = make_scorer(f1_score, beta=fbeta, pos_label=1)
         clf = GridSearchCV(rfc, parameters, scoring=scorer, verbose=verbose)
     else:
-        class_weight = cal_class_weight_np(array)
-        clf = RFC(class_weight = class_weight, max_depth=max_depth, verbose=verbose, n_jobs=n_jobs)
-        
-    X = array[:,:-2]
-    w = array[:,-2]
-    y = array[:,-1]
+        class_weight = calculate_class_weights(array)
+        clf = RFC(class_weight=class_weight, max_depth=max_depth, verbose=verbose, n_jobs=n_jobs)
+
+    X = array[:, :-2]
+    w = array[:, -2]
+    y = array[:, -1]
     del(array)
+
     clf.fit(X, y, sample_weight=w)
+
     return clf
 
+
 def test_rf(clf, antibody_list):
-    """Test a trained random forest on an antibody list
-    
+    """
+    Test a trained RandomForestClassifier on a list of antibody objects.
+
     Args:
-        clf: A trained classifier
-        antibody_list: A list of antibody objects
+        clf (RandomForestClassifier): A trained RandomForestClassifier object.
+        antibody_list (List[Antibody]): A list of antibody objects.
     """
     array = np.concatenate([i.arr_relative for i in antibody_list])
-    X = array[:,:-2]
-    w = array[:,-2]
-    y = array[:,-1]
-    
-    y_pred=clf.predict(X)
+    X = array[:, :-2]
+    w = array[:, -2]
+    y = array[:, -1]
+
+    y_pred = clf.predict(X)
     print_metrics(y, y_pred, w)
-        
+
+
 def F1score_rf(clf, antibody):
-    y=antibody.arr_relative[:, -1]
-    y_pred=clf.predict(antibody.arr_relative[:,:-2])
-    sample_weight=antibody.arr_relative[:, -2]
-    return metrics.f1_score(y, y_pred, sample_weight=sample_weight)
+    y = antibody.arr_relative[:, -1]
+    y_pred = clf.predict(antibody.arr_relative[:, :-2])
+    sample_weight = antibody.arr_relative[:, -2]
+    return f1_score(y, y_pred, sample_weight=sample_weight)
+
 
 def recall_rf(clf, antibody):
-    y=antibody.arr_relative[:, -1]
-    y_pred=clf.predict(antibody.arr_relative[:,:-2])
-    sample_weight=antibody.arr_relative[:, -2]
-    return metrics.recall_score(y, y_pred, sample_weight=sample_weight)
+    y = antibody.arr_relative[:, -1]
+    y_pred = clf.predict(antibody.arr_relative[:, :-2])
+    sample_weight = antibody.arr_relative[:, -2]
+    return recall_score(y, y_pred, sample_weight=sample_weight)
+
 
 def precision_rf(clf, antibody):
-    y=antibody.arr_relative[:, -1]
-    y_pred=clf.predict(antibody.arr_relative[:,:-2])
-    sample_weight=antibody.arr_relative[:, -2]
-    return metrics.precision_score(y, y_pred, sample_weight=sample_weight)
-    
+    y = antibody.arr_relative[:, -1]
+    y_pred = clf.predict(antibody.arr_relative[:, :-2])
+    sample_weight = antibody.arr_relative[:, -2]
+    return precision_score(y, y_pred, sample_weight=sample_weight)           
+
 """"............................NN classifier........................................"""
     
 def train_NN(antibody_list, record_name, batch_size, lr, NN_architecture=None,
@@ -438,161 +381,169 @@ def train_NN(antibody_list, record_name, batch_size, lr, NN_architecture=None,
               DataLoader_num_workers=0, GPU_name="cuda", reload_from_checkpoint=False):
     """
     Train a neural network using Pytorch.
-    Instead of returning a classifier, this function stores everything in 'metrics_NN/', 'tensorboard_NN/', 'Checkpoints_NN/' and 'Models/' folders. 
     
+    This function does not return a classifier. Instead, it stores the results in 'metrics_NN/', 'tensorboard_NN/', 'Checkpoints_NN/', and 'Models/' folders.
+
     Args:
-        antibody_list: A list of antibody objects
-        record_name: a string, the function will use this name to record everything in 'metrics_NN/', 'tensorboard_NN/', 'Checkpoints_NN/' and 'Models/' folders. 
-        batch_size: the batch size for training process (3000 to 10000)
-        lr: learning rate (0.0001 to 0.003)
-        NN_architecture: a list of integer, e.g., [1280,100,100,2] creates a NN which has 1280 as the inputs size, two hiden layers with 100 nodes, 2 as the outputs size. The first number should be 1280 for ESM embedding. The last should be 2 for two class classifier.
-        num_epochs: number of epochs
-        test_size: percentage of data holding out for validation
-        num_shuffle: e.g., if the num_shuffle is 5, the function will shuffle test_size data 5 times and train NN 5 times
-        early_stopping: early stop or not. It is designed to avoid overfitting. If it's true, this function will calculate the F1 score on the test_size data every epoch and then calculate the averaged F1 score over "rolling_average_range" epoch. (For example, if rolling_average_range is 70, the average F1 will be calcualted every 70 epochs.) If the current averaged F1 score is lower than the last averaged F1 score, the training process stops.
-        rolling_average_range: to define how many epochs averaged F1 is calcualted once.
-        DataLoader_num_workers: To avoid blocking computation code with data loading, PyTorch provides an easy switch to perform multi-process data loading by simply setting the argument num_workers to a positive integer. However, it does not work well on skywalkers.
-        GPU_name: GPU for training
-        reload_from_checkpoint: whether reload a training process or not.
+        antibody_list (list): A list of antibody objects.
+        record_name (str): A string used as the base name for storing results in the directories mentioned above.
+        batch_size (int): Batch size for the training process (recommended: 3000 to 10000).
+        lr (float): Learning rate (recommended: 0.0001 to 0.003).
+        NN_architecture (list, optional): A list of integers representing the neural network architecture. For example, [1280, 100, 100, 2] creates a neural network with 1280 input nodes (ESM embedding size), two hidden layers with 100 nodes each, and 2 output nodes for binary classification.
+        num_epochs (int, optional): Number of training epochs (default: 1000).
+        test_size (float, optional): Proportion of data reserved for validation (default: 0.1).
+        num_shuffle (int, optional): Number of times to shuffle test_size data and retrain the model (default: 1).
+        early_stopping (bool, optional): Whether to use early stopping to prevent overfitting (default: True). If True, the function calculates the F1 score on the test_size data every epoch and then computes the rolling average F1 score over "rolling_average_range" epochs. Training stops if the current rolling average F1 score is lower than the previous one.
+        rolling_average_range (int, optional): Number of epochs for calculating the rolling average F1 score (default: 70).
+        DataLoader_num_workers (int, optional): Number of workers for the PyTorch DataLoader (default: 0). Setting this to a positive integer enables multi-process data loading. However, it may not work well on all systems.
+        GPU_name (str, optional): GPU device name for training (default: "cuda").
+        reload_from_checkpoint (bool, optional): Whether to reload the training process from a checkpoint (default: False).
     """
 
-    if not os.path.exists('metrics_NN/'):
-        os.makedirs('metrics_NN/')
-    if not os.path.exists('tensorboard_NN/'):
-        os.makedirs('tensorboard_NN/')
-    if not os.path.exists('Checkpoints_NN/'):
-        os.makedirs('Checkpoints_NN/')   
-    if not os.path.exists('Models/'):
-        os.makedirs('Models/')   
-        
-    f = open('metrics_NN/'+record_name, 'w', newline='')
-    csv_writer = csv.writer(f)
-    csv_writer.writerow(['F1','Precision','Recall'])
-    
-    device = torch.device(GPU_name)
-    
-    metrics = {}
-    metrics['F1'] = F1Score(num_classes=2, average=None).to(device)
-    metrics['Precision'] = Precision(num_classes=2, average=None).to(device)
-    metrics['Recall'] = Recall(num_classes=2, average=None).to(device)
-    metrics_names = ['F1', 'Precision', 'Recall']
+    # Create necessary folders
+    for folder_name in ['metrics_NN', 'tensorboard_NN', 'Checkpoints_NN', 'Models']:
+        os.makedirs(folder_name, exist_ok=True)
 
-    for i in range(num_shuffle):
-        model = NeuralNet(NN_architecture)
-        model = model.to(device)
-        
-        writer = SummaryWriter('tensorboard_NN/{}_r{}'.format(record_name,i+1))
-        record_name_loop = '{}_r{}'.format(record_name, i+1)
-        tensor = load_data(antibody_list)
-        class_weight = cal_class_weight_tensor(tensor).to(device)
-        tensor_train, tensor_test = train_test_split(tensor, test_size=test_size)
-        del(tensor)
-        test_sample_len = tensor_test.shape[0]
-        
-        trainingset = TrainingSet(tensor_train)
-        Training_dataloader = DataLoader(dataset=trainingset, batch_size=batch_size, shuffle=True, num_workers=DataLoader_num_workers, drop_last=True)
-        
-        criterion = nn.CrossEntropyLoss(weight=class_weight, reduction='none')
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    
-        if reload_from_checkpoint:
-            loaded_checkpoint = torch.load("Checkpoints_NN/{}.pth".format(record_name_loop))
-            reloaded_epoch = loaded_checkpoint['epoch']
-            model.load_state_dict(checkpoint['model_state'])
-            optimizer.load_state_dict(checkpoint['optim_state'])
-        else:
-            reloaded_epoch = 0
-        
-        # training loop
-        n_step = len(Training_dataloader)
-        running_f1_score = 0.0
-        last_f1 = 0.0
-        
-        # Early stopping
-        current_score = {}
-        rolling_score = {}
-        current_average_score = {}
-        last_average_score = {}
-        last_average_score['F1'] = 0.0
-        for name in metrics_names:
-            rolling_score[name] = 0.0
+    with open('metrics_NN/'+record_name, 'w', newline='') as f:
+        csv_writer = csv.writer(f)
+        csv_writer.writerow(['F1','Precision','Recall'])
 
-        for epoch in range(num_epochs):
-            for i, (x, w, y) in enumerate(Training_dataloader):      
-                x, w, y = x.to(device), w.to(device), y.to(device)
-                #forward
-                outputs = model(x)
-                loss = criterion(outputs, y)
-                loss = loss * w
-                loss = loss.mean()
-                
-                #backwards
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                
-                _, predicted = torch.max(outputs, 1)
-                running_f1_score += metrics['F1'](predicted, y)[1].item()
-                
-                # prof.step()
+        device = torch.device(GPU_name)
+
+        # Initialize metrics and their names
+        metrics = {
+            'F1': F1Score(num_classes=2, average=None).to(device),
+            'Precision': Precision(num_classes=2, average=None).to(device),
+            'Recall': Recall(num_classes=2, average=None).to(device)
+        }
+        metrics_names = ['F1', 'Precision', 'Recall']
+
+        for i in range(num_shuffle):
+            model = NeuralNet(NN_architecture)
+            model = model.to(device)
             
-            # Track on training
-            current_f1 = running_f1_score / n_step
-            writer.add_scalar('training F1', current_f1, epoch+reloaded_epoch)
+            writer = SummaryWriter('tensorboard_NN/{}_r{}'.format(record_name,i+1))
+            record_name_loop = '{}_r{}'.format(record_name, i+1)
+            tensor = load_data(antibody_list)
+            class_weight = cal_class_weight_tensor(tensor).to(device)
+            tensor_train, tensor_test = train_test_split(tensor, test_size=test_size)
+            del(tensor)
+            test_sample_len = tensor_test.shape[0]
+            
+            trainingset = TrainingSet(tensor_train)
+            Training_dataloader = DataLoader(dataset=trainingset, batch_size=batch_size, shuffle=True, num_workers=DataLoader_num_workers, drop_last=True)
+            
+            criterion = nn.CrossEntropyLoss(weight=class_weight, reduction='none')
+            optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        
+            if reload_from_checkpoint:
+                loaded_checkpoint = torch.load("Checkpoints_NN/{}.pth".format(record_name_loop))
+                reloaded_epoch = loaded_checkpoint['epoch']
+                model.load_state_dict(checkpoint['model_state'])
+                optimizer.load_state_dict(checkpoint['optim_state'])
+            else:
+                reloaded_epoch = 0
+            
+            n_step = len(Training_dataloader)
             running_f1_score = 0.0
-                               
-            # Early stopping
-            if early_stopping:
-                for name in metrics_names:
-                    current_score[name] = 0.0             
-                for i in range(5):
-                    shuffle_index = torch.randint(high=test_sample_len, size=(3000,))
-                    shufflled_testset = tensor_test[shuffle_index].to(device)
-                    outputs = model(shufflled_testset[:,:-2])
-                    _, predicted = torch.max(outputs, 1)
-                    for name in metrics_names:
-                        current_score[name] += metrics[name](predicted, shufflled_testset[:,-1].long())[1].item()                    
-                for name in metrics_names:
-                    current_score[name] = current_score[name] /5 
-                               
-                writer.add_scalar('test F1', current_score['F1'], epoch+reloaded_epoch)
-                for name in metrics_names:
-                    rolling_score[name] += current_score[name]
-                               
-                if (epoch+1) % rolling_average_range == 0:
-                    for name in metrics_names:
-                        current_average_score[name] = rolling_score[name] / rolling_average_range
-                    print(f'epoch {epoch+1}, test_F1 = {current_average_score["F1"]:.4f}')
+            last_f1 = 0.0
+            
+            current_score = {}
+            rolling_score = {}
+            current_average_score = {}
+            last_average_score = {}
+            last_average_score['F1'] = 0.0
+            for name in metrics_names:
+                rolling_score[name] = 0.0
+
+            for epoch in range(num_epochs):
+                for i, (x, w, y) in enumerate(Training_dataloader):      
+                    x, w, y = x.to(device), w.to(device), y.to(device)
+                    #forward
+                    outputs = model(x)
+                    loss = criterion(outputs, y)
+                    loss = loss * w
+                    loss = loss.mean()
                     
-                    if current_average_score["F1"] < last_average_score["F1"]:
-                        torch.save(checkpoint, "Checkpoints_NN/{}.pth".format(record_name_loop))
-                        model.load_state_dict(checkpoint["model_state"])
-                        torch.save(model, "Models/{}.pth".format(record_name_loop))
-                        csv_writer.writerow([last_average_score['F1'],last_average_score['Precision'],last_average_score['Recall']]) 
-                        del(model, optimizer)
-                        break
-                    else:
-                        checkpoint = {
-                               "epoch": epoch + reloaded_epoch,
-                               "model_state": model.state_dict(),
-                               "optim_state": optimizer.state_dict()
-                               }
-                        for name in metrics_names:
-                            last_average_score[name] = current_average_score[name]                        
+                    #backwards
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    
+                    _, predicted = torch.max(outputs, 1)
+                    running_f1_score += metrics['F1'](predicted, y)[1].item()
+                
+                # Track on training
+                current_f1 = running_f1_score / n_step
+                writer.add_scalar('training F1', current_f1, epoch+reloaded_epoch)
+                running_f1_score = 0.0
+                                
+                # Early stopping
+                if early_stopping:
                     for name in metrics_names:
-                        rolling_score[name] = 0.0
+                        current_score[name] = 0.0             
+                    for i in range(5):
+                        shuffle_index = torch.randint(high=test_sample_len, size=(3000,))
+                        shufflled_testset = tensor_test[shuffle_index].to(device)
+                        outputs = model(shufflled_testset[:,:-2])
+                        _, predicted = torch.max(outputs, 1)
+                        for name in metrics_names:
+                            current_score[name] += metrics[name](predicted, shufflled_testset[:,-1].long())[1].item()                    
+                    for name in metrics_names:
+                        current_score[name] = current_score[name] /5 
+                                
+                    writer.add_scalar('test F1', current_score['F1'], epoch+reloaded_epoch)
+                    for name in metrics_names:
+                        rolling_score[name] += current_score[name]
+                                
+                    if (epoch+1) % rolling_average_range == 0:
+                        for name in metrics_names:
+                            current_average_score[name] = rolling_score[name] / rolling_average_range
+                        print(f'epoch {epoch+1}, test_F1 = {current_average_score["F1"]:.4f}')
                         
-    
-    f.close()                           
+                        if current_average_score["F1"] < last_average_score["F1"]:
+                            torch.save(checkpoint, "Checkpoints_NN/{}.pth".format(record_name_loop))
+                            model.load_state_dict(checkpoint["model_state"])
+                            torch.save(model, "Models/{}.pth".format(record_name_loop))
+                            csv_writer.writerow([last_average_score['F1'],last_average_score['Precision'],last_average_score['Recall']]) 
+                            del(model, optimizer)
+                            break
+                        else:
+                            checkpoint = {
+                                "epoch": epoch + reloaded_epoch,
+                                "model_state": model.state_dict(),
+                                "optim_state": optimizer.state_dict()
+                                }
+                            for name in metrics_names:
+                                last_average_score[name] = current_average_score[name]                        
+                        for name in metrics_names:
+                            rolling_score[name] = 0.0
 
 
 def load_data(antibody_list):
+    """
+    Load data from the given antibody list and convert it into a tensor.
+    
+    Args:
+        antibody_list (list): A list of antibody objects.
+
+    Returns:
+        tensor (torch.Tensor): A tensor containing the loaded data.
+    """
     array = np.concatenate([i.arr_relative for i in antibody_list])
     tensor = torch.from_numpy(array).float()
     return tensor
 
 def cal_class_weight_tensor(tensor):
-    """Calculate class weights"""
+    """
+    Calculate class weights for the given tensor.
+    
+    Args:
+        tensor (torch.Tensor): A tensor containing the data.
+
+    Returns:
+        li (torch.Tensor): A tensor containing the calculated class weights.
+    """
     li = torch.bincount(tensor[:,-1].long(), weights=tensor[:,-2])
     li = li/torch.max(li)
     li = 1/li
@@ -600,8 +551,10 @@ def cal_class_weight_tensor(tensor):
 
 class NeuralNet(nn.Module):
     """
+    Define a neural network model with the given architecture.
+    
     Args: 
-        NN_architecture: a list of int, for example: [input_size, hidden_layer1_size, ..., output_size]
+        NN_architecture (list): A list of integers representing the size of each layer, for example: [input_size, hidden_layer1_size, ..., output_size]
     """
     def __init__(self, NN_architecture):
         super().__init__()
@@ -619,9 +572,14 @@ class NeuralNet(nn.Module):
                 x = layer(x)
                 x = self.relu(x)
         return x
-    
-    
+
 class TrainingSet(Dataset):
+    """
+    A custom PyTorch Dataset class for the antibody training set.
+    
+    Args:
+        tensor (torch.Tensor): A tensor containing the training data.
+    """
     def __init__(self, tensor):
         self.x = tensor[:,:-2]
         self.w = tensor[:,-2]
@@ -633,13 +591,15 @@ class TrainingSet(Dataset):
     
     def __len__(self):
         return self.n_samples
-
+    
 def test_NN(model_name, antibody_list, map_location='cpu'):
-    """Test a trained NN on an antibody list
+    """
+    Test a trained neural network (NN) on a given antibody list.
     
     Args:
-        model_name: the name of a trained NN model stored in Models/ dirctory.
-        antibody_list: A list of antibody objects
+        model_name (str): The name of a trained NN model stored in the 'Models/' directory.
+        antibody_list (list): A list of antibody objects.
+        map_location (str): The device to map the model's tensors to ('cpu' or 'cuda').
     """
     metrics = {}
     metrics['F1'] = F1Score(num_classes=2, average=None)
@@ -659,12 +619,23 @@ def test_NN(model_name, antibody_list, map_location='cpu'):
         scores[metric_name] =  metrics[metric_name](predicted, tensor[:,-1].long())[1].item()
         print("{}: {:.3f}".format(metric_name, scores[metric_name]))
     del(tensor, model)
+
+def embedding_seqs(seqs):
+    """
+    Embed sequences using the ESM-1b model.
     
-def embeding_seqs(seqs):
+    Args:
+        seqs (list): A list of sequences to be embedded.
+
+    Returns:
+        delt (torch.Tensor): A tensor containing the difference between mutant and parent sequence representations.
+    """
     # Load ESM-1b model
     model, alphabet = esm.pretrained.esm1b_t33_650M_UR50S()
     batch_converter = alphabet.get_batch_converter()
     model.eval()  # disables dropout for deterministic results
+    
+    # Prepare data (first 2 sequences from ESMStructuralSplitDataset superfamily / 4)
     data = seqs
     batch_labels, batch_strs, batch_tokens = batch_converter(data)
     
@@ -672,6 +643,9 @@ def embeding_seqs(seqs):
     with torch.no_grad():
         results = model(batch_tokens, repr_layers=[33], return_contacts=True)
     token_representations = results["representations"][33]
+    
+    # Generate per-sequence representations via averaging
+    # NOTE: token 0 is always a beginning-of-sequence token, so the first residue is token 1.
     sequence_representations = []
     for i, (_, seq) in enumerate(data):
         sequence_representations.append(token_representations[i, 1 : len(seq) + 1].mean(0))
@@ -679,4 +653,3 @@ def embeding_seqs(seqs):
     parent = sequence_representations[0]
     delt = mutants - parent
     return delt
-    
