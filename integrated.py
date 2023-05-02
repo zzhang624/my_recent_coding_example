@@ -2,6 +2,7 @@ import csv
 import os
 import pathlib
 import re
+import glob
 
 import numpy as np
 import pandas as pd
@@ -21,7 +22,6 @@ from sklearn.metrics import fbeta_score, make_scorer
 from sklearn.model_selection import GridSearchCV, train_test_split
 import esm
 from esm import Alphabet, FastaBatchedDataset, ProteinBertModel, pretrained, MSATransformer
-
 
 def calculate_esm(model_location, fasta_file, output_dir, GPU_name='cuda:0', toks_per_batch=4096, nogpu=False, return_contacts=False, repr_layers=[-1]):
     fasta_file = pathlib.Path(fasta_file)
@@ -89,13 +89,10 @@ def esm_to_np(dir_name, output_file):
         dir_name (str): The directory containing ESM mean representations.
         output_file (str): The name of the output .npy file.
     """
-    li = []
-    for i in listdir(dir_name):
-        ts = torch.load(dir_name + "/" + i)["mean_representations"][33]
-        li.append(ts)
-    np.save(output_file, np.stack(li, axis=0))
+    li = [torch.load(f)["mean_representations"][33] for f in glob.glob(f"{dir_name}/*")]
+    np.save(output_file, np.array(li)) 
 
-def generate_training_dataset_from_csv(filepath, sequence_col_name, output_dirc, GPU_name='cuda'):
+def generate_training_dataset_from_csv(filepath, sequence_col_name, output_dir, GPU_name = 'cuda'):
     """
     This function reads a CSV file, generates a training dataset based on the specified sequence column,
     and saves the resulting training datasets in the given output directory.
@@ -103,58 +100,59 @@ def generate_training_dataset_from_csv(filepath, sequence_col_name, output_dirc,
     Args:
         filepath (str): The file path of the input CSV file.
         sequence_col_name (str): The name of the column in the CSV file containing the sequence data.
-        output_dirc (str): The directory path where the generated training datasets will be saved.
+        output_dir (str): The directory path where the generated training datasets will be saved.
         GPU_name (str, optional): The name of the GPU to be used for ESM embedding. Defaults to 'cuda'.
     """
-    if not os.path.exists(output_dirc):
-        mkdir(output_dirc)
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
     df = pd.read_csv(filepath)
-    generating(df, sequence_col_name, output_dirc, GPU_name=GPU_name)
+    generate_training_data(df, sequence_col_name, output_dir, GPU_name=GPU_name)
     
-def generate_training_dataset_from_excel(filepath, sequence_col_name, output_dirc, GPU_name='cuda', sheet_name=0):
+def generate_training_dataset_from_excel(filepath, sequence_col_name, output_dir, GPU_name='cuda', sheet_name=0):
     """
     Args: 
         filepath (str): The filepath of the input Excel file.
         sequence_col_name (str): The name of the column in the Excel file containing the sequence data.
-        output_dirc (str): The directory path where the generated training datasets will be saved.
+        output_dir (str): The directory path where the generated training datasets will be saved.
         GPU_name (str, optional): The name of the GPU to be used for ESM embedding. Defaults to 'cuda'.
         sheet_name (Union[int, str], optional): The sheet name or index in the Excel file to read data from.
             Strings are used for sheet names. Integers are used in zero-indexed sheet positions (chart sheets do not count as a sheet position). Defaults to 0.
     """
-    if not os.path.exists(output_dirc):
-        mkdir(output_dirc)
+    if not os.path.exists(output_dir):
+        mkdir(output_dir)
     df = pd.read_excel(filepath, sheet_name=sheet_name)
-    generating(df, sequence_col_name, output_dirc, GPU_name=GPU_name)
+    generate_training_data(df, sequence_col_name, output_dir, GPU_name=GPU_name)
 
-def generating(df, sequence_col_name, output_dirc, GPU_name):
-    df = df[df[sequence_col_name].apply(lambda x: type(x) == str)]
-    df = df[df[sequence_col_name].map(lambda x: False == bool(re.search('[^ARNDCEQGHILKMFPSTWYV]', x)))]
-    df.to_csv(output_dirc + "/refined.csv")
+def generate_training_data(df, sequence_col_name, output_dir, GPU_name):
+    df = df[df[sequence_col_name].apply(lambda x: re.search('[^ARNDCEQGHILKMFPSTWYV]', x) is None)]
+    df.to_csv(f"{output_dir}/Refined.csv")
     
     # Write fasta file
     i = 0
-    with open(output_dirc + "/refined.fas", 'w') as f:
+    with open(output_dir + "/refined.fas", 'w') as f:
         for index, item in df[sequence_col_name].items():
             if i != 0:
                 f.write("\n")
             f.write(f">{i}\n{item}")
             i += 1
     
-    calculate_esm("esm1b_t33_650M_UR50S", output_dirc + "/refined.fas", output_dirc + "/emb_esm1b", GPU_name=GPU_name)
-    esm_to_np(output_dirc + "/emb_esm1b", output_dirc + "/esm.npy")
-    rmtree(output_dirc + "/emb_esm1b")
-    remove(output_dirc + "/refined.fas")
+    calculate_esm("esm1b_t33_650M_UR50S", output_dir + "/refined.fas", output_dir + "/emb_esm1b", GPU_name=GPU_name)
+    esm_to_np(output_dir + "/emb_esm1b", output_dir + "/esm.npy")
+    rmtree(output_dir + "/emb_esm1b")
+    remove(output_dir + "/refined.fas")
 
 
 """"............................AntibodyCls........................................"""
 
 class AntibodyCls:
-    def __init__(self, dataset_dirc, mutation_count_column=None, D_col="Display", B_col="Bind", bin_num=2, using_chain_as_feature=False, name=None):
+    counts = {}
+
+    def __init__(self, dataset_dir, mutation_count_column=None, D_col="Display", B_col="Bind", bin_num=2, using_chain_as_feature=False, name=None):
         """
         Load an antibody dataset generated by the generate_training_dataset function into one object.
 
         Args: 
-            dataset_dirc (str): The name of the directory generated by the generate_training_dataset function.
+            dataset_dir (str): The name of the directory generated by the generate_training_dataset function.
             mutation_count_column (str, optional): The name of the mutation count column in the dataset. If not provided, the parental index defaults to 0.
             D_col (str, optional): The name of the column representing display values in the dataset. Defaults to "Display".
             B_col (str, optional): The name of the column representing bind values in the dataset. Defaults to "Bind".
@@ -162,70 +160,63 @@ class AntibodyCls:
             using_chain_as_feature (bool, optional): Whether to add HC or LC as an input feature. Defaults to False.
             name (str, optional): Used only when using_chain_as_feature is True. Distinguishes between HC and LC by checking if the name contains "HC" or "LC". Defaults to None.
         """
-        self.esm = np.load(dataset_dirc+"/esm.npy")
+        self.esm = np.load(dataset_dir+"/esm.npy")
         self.n_sequences = self.esm.shape[0]
-        self.df = pd.read_csv(dataset_dirc+"/refined.csv")
+        self.df = pd.read_csv(dataset_dir+"/refined.csv")
         self.bin_num = bin_num
         self.name = name
         self.D_col = D_col 
         self.B_col = B_col
         self.using_chain_as_feature = using_chain_as_feature
+
         if using_chain_as_feature:
-            if 'HC' in name:
-                self.chain = 1
-            else:
-                self.chain = 0
+            self.chain = 1 if 'HC' in name else 0
         
+        self.parent_index = self.get_parent_index(mutation_count_column)
+        
+    def get_parent_index(self, mutation_count_column):
         if mutation_count_column:
-            self.update_parent_index(mutation_count_column)
+            return self.df[self.df[mutation_count_column] == 0].index[0]
         else:
-            self.parent_index=0
+            return 0
         
-    
     def generate_training_array(self):
-        self.cal_binding()
-        self.cal_ln_weight()
+        self.calculate_binding()
+        self.calculate_ln_weight()
         self.generate_relative_data()
-        self.calculate_training_array()
-            
-    
-    def update_parent_index(self, mutation_count_column):
-        """Update the parental index using mutation count"""
-        self.parent_index = self.df[self.df[mutation_count_column]==0].index[0]
+        self.calculate_training_array_relative()
    
-    
-    def cal_binding(self):
-        """
-        Calculate binding affinity and add the binding affinity as a column 'binding' to date frame.
-        """
-        if self.bin_num==4:
-            df = self.df[['Bin1','Bin2','Bin3','Bin4']]
-            df = df/AntibodyCls.counts[self.name]['reads_bins']*AntibodyCls.counts[self.name]['cells_bins']
-            self.df['binding'] = df.apply(lambda x: AntibodyCls.func2(x['Bin1'], x['Bin2'], x['Bin3'], x['Bin4']), axis=1)
-            
-        elif self.bin_num==2:
-            sum_bind = self.df[self.B_col].sum()
-            sum_display = self.df[self.D_col].sum()
-            pop_frac_bind = self.df[self.B_col]/sum_bind
-            pop_frac_display = self.df[self.D_col]/sum_display
-            self.df['binding'] = pop_frac_bind/pop_frac_display
+    def calculate_binding(self):
+        if self.bin_num == 4:
+            self.df['binding'] = self.calculate_binding_4_bins()
+        elif self.bin_num == 2:
+            self.df['binding'] = self.calculate_binding_2_bins()
+
+    def calculate_binding_4_bins(self):
+        df = self.df[['Bin1', 'Bin2', 'Bin3', 'Bin4']]
+        df = df / AntibodyCls.counts[self.name]['reads_bins'] * AntibodyCls.counts[self.name]['cells_bins']
+        return df.apply(lambda x: AntibodyCls.func2(x['Bin1'], x['Bin2'], x['Bin3'], x['Bin4']), axis=1)
+
+    def calculate_binding_2_bins(self):
+        sum_bind = self.df[self.B_col].sum()
+        sum_display = self.df[self.D_col].sum()
+        pop_frac_bind = self.df[self.B_col] / sum_bind
+        pop_frac_display = self.df[self.D_col] / sum_display
+        return pop_frac_bind / pop_frac_display
             
     @staticmethod
     def func1(a,b,c,d):
-        return (a*1+b*2+c*3+d*4) / (a+b+c+d)
+        return (a * 1 + b * 2 + c * 3 + d * 4) / (a + b + c + d)
     
     @staticmethod
     def func2(a,b,c,d):
-        return (a+b)/(c+d) if (c+d) != 0 else float('inf')
+        return (a + b) / (c + d) if (c + d) != 0 else float('inf')
     
-    def cal_ln_weight(self):
-        if self.bin_num==4:
-            self.df['sample_weight'] = np.log(self.df['Bin1']+self.df['Bin2']+self.df['Bin3']+self.df['Bin4'])
-        elif self.bin_num==2:
-            self.df['sample_weight'] = np.log(self.df[self.B_col]+self.df[self.D_col])
-        
-    def classify(self):
-        self.df["class"] = self.df['binding'].apply(self.map_1)
+    def calculate_ln_weight(self):
+        if self.bin_num == 4:
+            self.df['sample_weight'] = np.log(self.df['Bin1'] + self.df['Bin2'] + self.df['Bin3'] + self.df['Bin4'])
+        elif self.bin_num == 2:
+            self.df['sample_weight'] = np.log(self.df[self.B_col] + self.df[self.D_col])
             
     def generate_relative_data(self):
         parent_series = self.df.loc[self.parent_index]
@@ -235,10 +226,10 @@ class AntibodyCls:
         self.down_20 = parent_series['binding'] * 0.8
         self.df_relative["class"] = self.df_relative['binding'].apply(self.map_2)
         count = np.bincount(self.df_relative["class"].to_numpy())
-        self.classes_ratio = count[0]/count[1]
-            
+        self.classes_ratio = count[0] / count[1]
+
         parent_repres = self.esm[self.parent_index]
-        self.esm_relative =  np.delete(self.esm, self.parent_index, axis=0)
+        self.esm_relative = np.delete(self.esm, self.parent_index, axis=0)
         self.esm_relative = self.esm_relative - parent_repres
         
     @staticmethod
@@ -256,21 +247,17 @@ class AntibodyCls:
         else:
             return 1    
         
-    def calculate_training_array(self, relative_data = True):
-        if relative_data:
-            df_array = self.df_relative[['sample_weight','class']].to_numpy()
-            if self.using_chain_as_feature:
-                chain_feature = np.array( [[self.chain]] * (self.n_sequences -1) )
-                self.arr_relative = np.concatenate((chain_feature, self.esm_relative, df_array), axis=1)
-            else: 
-                self.arr_relative = np.concatenate((self.esm_relative, df_array), axis=1)
-                
-            del self.esm
-            del self.esm_relative
+    def calculate_training_array_relative(self):
+        df_array = self.df_relative[['sample_weight', 'class']].to_numpy()
+
+        if self.using_chain_as_feature:
+            chain_feature = np.array([[self.chain]] * (self.n_sequences - 1))
+            self.arr_relative = np.concatenate((chain_feature, self.esm_relative, df_array), axis=1)
         else:
-            df_array = self.df[['sample_weight','class']].to_numpy()
-            self.arr = np.concatenate((self.esm, df_array), axis=1)
-            del self.esm
+            self.arr_relative = np.concatenate((self.esm_relative, df_array), axis=1)
+
+        del self.esm
+        del self.esm_relative
 
 """"............................Random Forest classifier........................................"""
 
@@ -278,19 +265,16 @@ def calculate_class_weights(array, ratio=1):
     """Calculate class weights"""
     if ratio is None:
         return None
-    r = [1]
-    r.append(ratio)
-    li = np.bincount(array[:, -1].astype(int), weights=array[:, -2])
-    li = li / li.max()
-    li = 1 / li
-    li = li * r
-    return dict(enumerate(li))
+    r = [1, ratio]
+    weights = np.bincount(array[:, -1].astype(int), weights=array[:, -2])
+    weights = weights / weights.max()
+    weights = 1 / weights
+    weights = weights * r
+    return dict(enumerate(weights))
 
-
-def print_metrics(y_test, y_pred, sample_weight):
-    print("F1_score for [lower affinity, maintain or increase] class:",
-          f1_score(y_test, y_pred, sample_weight=sample_weight, average=None))
-
+def print_metrics(y_true, y_pred, sample_weight):
+    """Print F1 score for each class"""
+    print("F1_score for each class:", f1_score(y_true, y_pred, sample_weight=sample_weight, average=None))
 
 def train_rf(antibody_list=[], verbose=0, n_jobs=25, max_depth=20, tune_hyper=False, parameters={}, fbeta=1):
     """
@@ -327,15 +311,11 @@ def train_rf(antibody_list=[], verbose=0, n_jobs=25, max_depth=20, tune_hyper=Fa
         class_weight = calculate_class_weights(array)
         clf = RFC(class_weight=class_weight, max_depth=max_depth, verbose=verbose, n_jobs=n_jobs)
 
-    X = array[:, :-2]
-    w = array[:, -2]
-    y = array[:, -1]
     del(array)
 
     clf.fit(X, y, sample_weight=w)
 
     return clf
-
 
 def test_rf(clf, antibody_list):
     """
@@ -352,27 +332,7 @@ def test_rf(clf, antibody_list):
 
     y_pred = clf.predict(X)
     print_metrics(y, y_pred, w)
-
-
-def F1score_rf(clf, antibody):
-    y = antibody.arr_relative[:, -1]
-    y_pred = clf.predict(antibody.arr_relative[:, :-2])
-    sample_weight = antibody.arr_relative[:, -2]
-    return f1_score(y, y_pred, sample_weight=sample_weight)
-
-
-def recall_rf(clf, antibody):
-    y = antibody.arr_relative[:, -1]
-    y_pred = clf.predict(antibody.arr_relative[:, :-2])
-    sample_weight = antibody.arr_relative[:, -2]
-    return recall_score(y, y_pred, sample_weight=sample_weight)
-
-
-def precision_rf(clf, antibody):
-    y = antibody.arr_relative[:, -1]
-    y_pred = clf.predict(antibody.arr_relative[:, :-2])
-    sample_weight = antibody.arr_relative[:, -2]
-    return precision_score(y, y_pred, sample_weight=sample_weight)           
+         
 
 """"............................NN classifier........................................"""
     
@@ -400,124 +360,134 @@ def train_NN(antibody_list, record_name, batch_size, lr, NN_architecture=None,
         reload_from_checkpoint (bool, optional): Whether to reload the training process from a checkpoint (default: False).
     """
 
-    # Create necessary folders
-    for folder_name in ['metrics_NN', 'tensorboard_NN', 'Checkpoints_NN', 'Models']:
-        os.makedirs(folder_name, exist_ok=True)
+    def create_directories(directory_list):
+        for folder_name in directory_list:
+            os.makedirs(folder_name, exist_ok=True)
 
-    with open('metrics_NN/'+record_name, 'w', newline='') as f:
-        csv_writer = csv.writer(f)
-        csv_writer.writerow(['F1','Precision','Recall'])
-
-        device = torch.device(GPU_name)
-
-        # Initialize metrics and their names
-        metrics = {
+    def initialize_metrics(device):
+        return {
             'F1': F1Score(num_classes=2, average=None).to(device),
             'Precision': Precision(num_classes=2, average=None).to(device),
             'Recall': Recall(num_classes=2, average=None).to(device)
         }
+
+    def load_checkpoint(record_name_loop):
+        loaded_checkpoint = torch.load("Checkpoints_NN/{}.pth".format(record_name_loop))
+        reloaded_epoch = loaded_checkpoint['epoch']
+        model.load_state_dict(loaded_checkpoint['model_state'])
+        optimizer.load_state_dict(loaded_checkpoint['optim_state'])
+        return reloaded_epoch
+
+    def save_checkpoint(epoch, model, optimizer, record_name_loop):
+        checkpoint = {
+            "epoch": epoch,
+            "model_state": model.state_dict(),
+            "optim_state": optimizer.state_dict()
+        }
+        torch.save(checkpoint, "Checkpoints_NN/{}.pth".format(record_name_loop))
+
+    def early_stopping_check(metrics_names, current_score, last_average_score, rolling_score, rolling_average_range, epoch):
+        for name in metrics_names:
+            current_score[name] = current_score[name] / 5
+
+        for name in metrics_names:
+            rolling_score[name] += current_score[name]
+
+        if (epoch + 1) % rolling_average_range == 0:
+            current_average_score = {name: rolling_score[name] / rolling_average_range for name in metrics_names}
+            print(f'epoch {epoch+1}, test_F1 = {current_average_score["F1"]:.4f}')
+
+            if current_average_score["F1"] < last_average_score["F1"]:
+                return True, current_average_score
+            else:
+                last_average_score = current_average_score
+                for name in metrics_names:
+                    rolling_score[name] = 0.0
+        return False, last_average_score
+
+    # Create necessary folders
+    create_directories(['metrics_NN', 'tensorboard_NN', 'Checkpoints_NN', 'Models'])
+
+    with open('metrics_NN/' + record_name, 'w', newline='') as f:
+        csv_writer = csv.writer(f)
+        csv_writer.writerow(['F1', 'Precision', 'Recall'])
+
+        device = torch.device(GPU_name)
+        metrics = initialize_metrics(device)
         metrics_names = ['F1', 'Precision', 'Recall']
 
         for i in range(num_shuffle):
-            model = NeuralNet(NN_architecture)
-            model = model.to(device)
-            
-            writer = SummaryWriter('tensorboard_NN/{}_r{}'.format(record_name,i+1))
-            record_name_loop = '{}_r{}'.format(record_name, i+1)
+            model = NeuralNet(NN_architecture).to(device)
+            writer = SummaryWriter('tensorboard_NN/{}_r{}'.format(record_name, i + 1))
+            record_name_loop = '{}_r{}'.format(record_name, i + 1)
             tensor = load_data(antibody_list)
             class_weight = cal_class_weight_tensor(tensor).to(device)
             tensor_train, tensor_test = train_test_split(tensor, test_size=test_size)
             del(tensor)
             test_sample_len = tensor_test.shape[0]
-            
+
             trainingset = TrainingSet(tensor_train)
             Training_dataloader = DataLoader(dataset=trainingset, batch_size=batch_size, shuffle=True, num_workers=DataLoader_num_workers, drop_last=True)
-            
+
             criterion = nn.CrossEntropyLoss(weight=class_weight, reduction='none')
             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        
+
             if reload_from_checkpoint:
-                loaded_checkpoint = torch.load("Checkpoints_NN/{}.pth".format(record_name_loop))
-                reloaded_epoch = loaded_checkpoint['epoch']
-                model.load_state_dict(checkpoint['model_state'])
-                optimizer.load_state_dict(checkpoint['optim_state'])
+                reloaded_epoch = load_checkpoint(record_name_loop)
             else:
                 reloaded_epoch = 0
-            
+
             n_step = len(Training_dataloader)
             running_f1_score = 0.0
-            last_f1 = 0.0
-            
             current_score = {}
             rolling_score = {}
-            current_average_score = {}
             last_average_score = {}
             last_average_score['F1'] = 0.0
             for name in metrics_names:
                 rolling_score[name] = 0.0
 
             for epoch in range(num_epochs):
-                for i, (x, w, y) in enumerate(Training_dataloader):      
+                for i, (x, w, y) in enumerate(Training_dataloader):
                     x, w, y = x.to(device), w.to(device), y.to(device)
-                    #forward
                     outputs = model(x)
                     loss = criterion(outputs, y)
                     loss = loss * w
                     loss = loss.mean()
-                    
-                    #backwards
+
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-                    
+
                     _, predicted = torch.max(outputs, 1)
                     running_f1_score += metrics['F1'](predicted, y)[1].item()
-                
-                # Track on training
+
                 current_f1 = running_f1_score / n_step
-                writer.add_scalar('training F1', current_f1, epoch+reloaded_epoch)
+                writer.add_scalar('training F1', current_f1, epoch + reloaded_epoch)
                 running_f1_score = 0.0
-                                
-                # Early stopping
+
                 if early_stopping:
                     for name in metrics_names:
-                        current_score[name] = 0.0             
+                        current_score[name] = 0.0
                     for i in range(5):
                         shuffle_index = torch.randint(high=test_sample_len, size=(3000,))
                         shufflled_testset = tensor_test[shuffle_index].to(device)
-                        outputs = model(shufflled_testset[:,:-2])
+                        outputs = model(shufflled_testset[:, :-2])
                         _, predicted = torch.max(outputs, 1)
                         for name in metrics_names:
-                            current_score[name] += metrics[name](predicted, shufflled_testset[:,-1].long())[1].item()                    
-                    for name in metrics_names:
-                        current_score[name] = current_score[name] /5 
-                                
-                    writer.add_scalar('test F1', current_score['F1'], epoch+reloaded_epoch)
-                    for name in metrics_names:
-                        rolling_score[name] += current_score[name]
-                                
-                    if (epoch+1) % rolling_average_range == 0:
-                        for name in metrics_names:
-                            current_average_score[name] = rolling_score[name] / rolling_average_range
-                        print(f'epoch {epoch+1}, test_F1 = {current_average_score["F1"]:.4f}')
-                        
-                        if current_average_score["F1"] < last_average_score["F1"]:
-                            torch.save(checkpoint, "Checkpoints_NN/{}.pth".format(record_name_loop))
-                            model.load_state_dict(checkpoint["model_state"])
-                            torch.save(model, "Models/{}.pth".format(record_name_loop))
-                            csv_writer.writerow([last_average_score['F1'],last_average_score['Precision'],last_average_score['Recall']]) 
-                            del(model, optimizer)
-                            break
-                        else:
-                            checkpoint = {
-                                "epoch": epoch + reloaded_epoch,
-                                "model_state": model.state_dict(),
-                                "optim_state": optimizer.state_dict()
-                                }
-                            for name in metrics_names:
-                                last_average_score[name] = current_average_score[name]                        
-                        for name in metrics_names:
-                            rolling_score[name] = 0.0
+                            current_score[name] += metrics[name](predicted, shufflled_testset[:, -1].long())[1].item()
+
+                    writer.add_scalar('test F1', current_score['F1'], epoch + reloaded_epoch)
+                    stop_training, last_average_score = early_stopping_check(metrics_names, current_score, last_average_score, rolling_score, rolling_average_range, epoch)
+
+                    if stop_training:
+                        save_checkpoint(epoch + reloaded_epoch, model, optimizer, record_name_loop)
+                        model.load_state_dict(torch.load("Checkpoints_NN/{}.pth".format(record_name_loop))["model_state"])
+                        torch.save(model, "Models/{}.pth".format(record_name_loop))
+                        csv_writer.writerow([last_average_score['F1'], last_average_score['Precision'], last_average_score['Recall']])
+                        del(model, optimizer)
+                        break
+                    else:
+                        save_checkpoint(epoch + reloaded_epoch, model, optimizer, record_name_loop)
 
 
 def load_data(antibody_list):
@@ -566,10 +536,8 @@ class NeuralNet(nn.Module):
         
     def forward(self, x):
         for n, layer in enumerate(self.layers):
-            if n == self.num_layers - 1:
-                x = layer(x)
-            else:
-                x = layer(x)
+            x = layer(x)
+            if n != self.num_layers - 1:
                 x = self.relu(x)
         return x
 
@@ -601,19 +569,18 @@ def test_NN(model_name, antibody_list, map_location='cpu'):
         antibody_list (list): A list of antibody objects.
         map_location (str): The device to map the model's tensors to ('cpu' or 'cuda').
     """
-    metrics = {}
-    metrics['F1'] = F1Score(num_classes=2, average=None)
-    metrics['Precision'] = Precision(num_classes=2, average=None)
-    metrics['Recall'] = Recall(num_classes=2, average=None)
+    metrics = {
+        'F1': F1Score(num_classes=2, average=None),
+        'Precision': Precision(num_classes=2, average=None),
+        'Recall': Recall(num_classes=2, average=None)
+    }
     metrics_names = ['F1', 'Precision', 'Recall']
     
     model = torch.load('Models/{}'.format(model_name), map_location=map_location)
     model.eval()
     tensor = load_data(antibody_list)
-    
     outputs = model(tensor[:,:-2])
     _, predicted = torch.max(outputs, 1)
-    
     scores = {}
     for metric_name in metrics_names:
         scores[metric_name] =  metrics[metric_name](predicted, tensor[:,-1].long())[1].item()
