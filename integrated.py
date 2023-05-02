@@ -108,19 +108,19 @@ def generate_training_dataset_from_csv(filepath, sequence_col_name, output_dir, 
     df = pd.read_csv(filepath)
     generate_training_data(df, sequence_col_name, output_dir, GPU_name=GPU_name)
     
-def generate_training_dataset_from_excel(filepath, sequence_col_name, output_dir, GPU_name='cuda', sheet_name=0):
+def generate_training_dataset_from_excel(filepath, sequence_col_name, output_dir, GPU_name='cuda', sheet_index=0):
     """
     Args: 
         filepath (str): The filepath of the input Excel file.
         sequence_col_name (str): The name of the column in the Excel file containing the sequence data.
         output_dir (str): The directory path where the generated training datasets will be saved.
         GPU_name (str, optional): The name of the GPU to be used for ESM embedding. Defaults to 'cuda'.
-        sheet_name (Union[int, str], optional): The sheet name or index in the Excel file to read data from.
+        sheet_index (Union[int, str], optional): The sheet name or index in the Excel file to read data from.
             Strings are used for sheet names. Integers are used in zero-indexed sheet positions (chart sheets do not count as a sheet position). Defaults to 0.
     """
     if not os.path.exists(output_dir):
         mkdir(output_dir)
-    df = pd.read_excel(filepath, sheet_name=sheet_name)
+    df = pd.read_excel(filepath, sheet_index=sheet_index)
     generate_training_data(df, sequence_col_name, output_dir, GPU_name=GPU_name)
 
 def generate_training_data(df, sequence_col_name, output_dir, GPU_name):
