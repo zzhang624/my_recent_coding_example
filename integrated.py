@@ -89,7 +89,10 @@ def esm_to_np(dir_name, output_file):
         dir_name (str): The directory containing ESM mean representations.
         output_file (str): The name of the output .npy file.
     """
-    li = [torch.load(f)["mean_representations"][33] for f in glob.glob(f"{dir_name}/*")]
+    dir_name = pathlib.Path(dir_name)
+    output_file = pathlib.Path(output_file)
+
+    li = [torch.load(f)["mean_representations"][33] for f in dir_name.glob("*")]
     np.save(output_file, np.array(li)) 
 
 def generate_training_dataset_from_csv(filepath, sequence_col_name, output_dir, GPU_name = 'cuda'):
@@ -124,22 +127,25 @@ def generate_training_dataset_from_excel(filepath, sequence_col_name, output_dir
     generate_training_data(df, sequence_col_name, output_dir, GPU_name=GPU_name)
 
 def generate_training_data(df, sequence_col_name, output_dir, GPU_name):
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     df = df[df[sequence_col_name].apply(lambda x: re.search('[^ARNDCEQGHILKMFPSTWYV]', x) is None)]
     df.to_csv(f"{output_dir}/Refined.csv")
     
     # Write fasta file
     i = 0
-    with open(output_dir + "/refined.fas", 'w') as f:
+    fas_path = output_dir / "refined.fas"
+    with fas_path.open('w') as f:
         for index, item in df[sequence_col_name].items():
             if i != 0:
                 f.write("\n")
             f.write(f">{i}\n{item}")
             i += 1
     
-    calculate_esm("esm1b_t33_650M_UR50S", output_dir + "/refined.fas", output_dir + "/emb_esm1b", GPU_name=GPU_name)
-    esm_to_np(output_dir + "/emb_esm1b", output_dir + "/esm.npy")
-    rmtree(output_dir + "/emb_esm1b")
-    remove(output_dir + "/refined.fas")
+    calculate_esm("esm1b_t33_650M_UR50S", fas_path, output_dir / "emb_esm1b", GPU_name=GPU_name)
+    esm_to_np(output_dir / "emb_esm1b", output_dir / "esm.npy")
+    rmtree(output_dir / "emb_esm1b")
 
 
 """"............................AntibodyCls........................................"""
